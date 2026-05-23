@@ -1,0 +1,32 @@
+===== TRIAL 1: 100 Patients =====
+Total Simulation Time   : 261.46 min
+Throughput              : 0.38 patients/min
+Avg Queue Wait Time     : 111.66 min
+Avg Service Time        : 10.21 min
+CPU Utilization         : 0.0%
+Counter 1 Utilization   : 99.9%
+Counter 2 Utilization   : 99.9%
+Counter 3 Utilization   : 99.7%
+Counter 4 Utilization   : 99.7%
+
+===== TRIAL 2: 300 Patients =====
+Total Simulation Time   : 759.37 min
+Throughput              : 0.40 patients/min
+Avg Queue Wait Time     : 344.14 min
+Avg Service Time        : 10.06 min
+CPU Utilization         : 63.6%
+Counter 1 Utilization   : 100.0%
+Counter 2 Utilization   : 100.0%
+Counter 3 Utilization   : 99.9%
+Counter 4 Utilization   : 99.9%
+
+===== TRIAL 3: 500 Patients =====
+Total Simulation Time   : 1247.74 min
+Throughput              : 0.40 patients/min
+Avg Queue Wait Time     : 571.45 min
+Avg Service Time        : 9.96 min
+CPU Utilization         : 16.7%
+Counter 1 Utilization   : 100.0%
+Counter 2 Utilization   : 100.0%
+Counter 3 Utilization   : 99.9%
+Counter 4 Utilization   : 99.9%

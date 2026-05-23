@@ -26,11 +26,10 @@ class DESEngine:
         self.current_time = 0.0
         self.event_queue: List[Event] = []
         
-        # waiting_queue contains elements of form: (priority, arrival_time, patient_id)
-        # priority: 0 for emergency, 1 for regular
-        # arrival_time: tie-breaker (FIFO within priority class)
+        # waiting_queue contains elements of form: (arrival_time, patient_id)
+        # arrival_time: tie-breaker (FIFO)
         # patient_id: secondary tie-breaker
-        self.waiting_queue: List[Tuple[int, float, int]] = []
+        self.waiting_queue: List[Tuple[float, int]] = []
         
         self.counters_busy = [False] * c  # Track which registration counters are busy
         self.patients: Dict[int, Patient] = {}
@@ -41,7 +40,7 @@ class DESEngine:
         
         # Time-weighted statistics
         self.area_queue_length = 0.0
-        self.area_counter_utilization = 0.0
+        self.area_counter_utilization = [0.0] * c
         
         # Warmup transition settings
         if self.warmup_patients == 0:
@@ -76,7 +75,7 @@ class DESEngine:
     def _reset_warmup_stats(self):
         """Clears all accumulated stats and resets integration start to remove initialization bias."""
         self.area_queue_length = 0.0
-        self.area_counter_utilization = 0.0
+        self.area_counter_utilization = [0.0] * self.c
         self.stats_start_time = self.current_time
         
         self.recorded_patients_served.clear()
@@ -103,13 +102,13 @@ class DESEngine:
             time_diff = self.current_time - self.last_state_change_time
             if time_diff > 0:
                 self.area_queue_length += len(self.waiting_queue) * time_diff
-                self.area_counter_utilization += sum(self.counters_busy) * time_diff
+                for i in range(self.c):
+                    if self.counters_busy[i]:
+                        self.area_counter_utilization[i] += time_diff
             self.last_state_change_time = self.current_time
 
             if event.event_type == EventType.ARRIVAL:
-                # 20% chance of emergency patient
-                priority = 0 if self.rng.random() < 0.2 else 1
-                patient = Patient(patient_id=event.patient_id, arrival_time=self.current_time, priority=priority)
+                patient = Patient(patient_id=event.patient_id, arrival_time=self.current_time)
                 self.patients[patient.patient_id] = patient
                 
                 # Check for idle registration counter
@@ -133,8 +132,8 @@ class DESEngine:
                         idle_counter_id
                     )
                 else:
-                    # Place in waiting queue (priority-sorted)
-                    heapq.heappush(self.waiting_queue, (patient.priority, patient.arrival_time, patient.patient_id))
+                    # Place in waiting queue (FIFO)
+                    heapq.heappush(self.waiting_queue, (patient.arrival_time, patient.patient_id))
 
                 # Schedule next arrival
                 inter_arr = self.rng.expovariate(self.lam)
@@ -165,8 +164,9 @@ class DESEngine:
                     
                     # If queue is not empty, serve next patient from priority waiting queue
                     if self.waiting_queue:
-                        priority, arrival_time, pid = heapq.heappop(self.waiting_queue)
+                        arrival_time, pid = heapq.heappop(self.waiting_queue)
                         next_patient = self.patients[pid]
+
                         
                         self.counters_busy[counter_id] = True
                         next_patient.service_start_time = self.current_time
@@ -191,24 +191,16 @@ class DESEngine:
             sim_duration_post_warmup = 1e-9
 
         avg_q_len = self.area_queue_length / sim_duration_post_warmup
-        avg_util = self.area_counter_utilization / (self.c * sim_duration_post_warmup)
+        counter_utils = [area / sim_duration_post_warmup for area in self.area_counter_utilization]
         
         # Filter patients served post-warmup
         wait_times = [p.wait_time for p in self.recorded_patients_served if p.wait_time is not None]
         system_times = [p.system_time for p in self.recorded_patients_served if p.system_time is not None]
+        service_times = [p.service_duration for p in self.recorded_patients_served if p.service_duration is not None]
         
         avg_wait = sum(wait_times) / len(wait_times) if wait_times else 0.0
         avg_sys = sum(system_times) / len(system_times) if system_times else 0.0
-        
-        # Priority breakdown
-        emergency_patients = [p for p in self.recorded_patients_served if p.priority == 0]
-        regular_patients = [p for p in self.recorded_patients_served if p.priority == 1]
-        
-        emergency_wait_times = [p.wait_time for p in emergency_patients if p.wait_time is not None]
-        regular_wait_times = [p.wait_time for p in regular_patients if p.wait_time is not None]
-        
-        avg_wait_emergency = sum(emergency_wait_times) / len(emergency_wait_times) if emergency_wait_times else 0.0
-        avg_wait_regular = sum(regular_wait_times) / len(regular_wait_times) if regular_wait_times else 0.0
+        avg_service = sum(service_times) / len(service_times) if service_times else 0.0
 
         # Pick a random seed for the returned result
         seed_val = self.rng.randint(0, 10000000)
@@ -216,15 +208,10 @@ class DESEngine:
         return TrialResult(
             seed=seed_val,
             avg_wait_time=avg_wait,
+            avg_service_time=avg_service,
             avg_system_time=avg_sys,
             avg_queue_length=avg_q_len,
-            server_utilization=avg_util,
+            counter_utilizations=counter_utils,
             sim_duration=sim_duration_post_warmup,
             total_patients_served=len(self.recorded_patients_served),
-            inter_arrival_times=self.recorded_inter_arrival_times,
-            service_times=self.recorded_service_times,
-            emergency_patients_count=len(emergency_patients),
-            regular_patients_count=len(regular_patients),
-            avg_wait_time_emergency=avg_wait_emergency,
-            avg_wait_time_regular=avg_wait_regular
         )

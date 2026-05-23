@@ -25,7 +25,6 @@ class Event:
 class Patient:
     patient_id: int
     arrival_time: float
-    priority: int  # 0 for EMERGENCY (high priority), 1 for REGULAR (normal priority)
     service_start_time: Optional[float] = None
     departure_time: Optional[float] = None
     service_duration: Optional[float] = None
@@ -47,18 +46,10 @@ class Patient:
 class TrialResult:
     seed: int
     avg_wait_time: float
+    avg_service_time: float
     avg_system_time: float
     avg_queue_length: float
-    server_utilization: float  # counter utilization
+    counter_utilizations: List[float]
     sim_duration: float
     total_patients_served: int
-    
-    # Validation data pools
-    inter_arrival_times: List[float] = field(default_factory=list)
-    service_times: List[float] = field(default_factory=list)
-    
-    # Priority performance breakdown
-    emergency_patients_count: int = 0
-    regular_patients_count: int = 0
-    avg_wait_time_emergency: float = 0.0
-    avg_wait_time_regular: float = 0.0
+
