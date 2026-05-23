@@ -222,7 +222,7 @@ def generate_qq_plots(
     plt.figure(figsize=(7.5, 5.5), dpi=300)
     stats.probplot(service_times, dist="norm", sparams=(mean_service, std_service), plot=plt)
     
-    plt.title("Q-Q Plot: Service Times vs. Normal(8, 2)", fontweight="bold", pad=15)
+    plt.title(f"Q-Q Plot: Service Times vs. Normal({mean_service:.1f}, {std_service:.1f})", fontweight="bold", pad=15)
     plt.xlabel("Theoretical Normal Quantiles")
     plt.ylabel("Sample Ordered Values (minutes)")
     
