@@ -210,19 +210,21 @@ def main():
     print("└──────────────────────────────┴─────────────┴─────────────┴─────────────┘")
     
     # Table 2: Performance Timing Comparison Table
-    print("\n┌────────────────────────────────────────────────────────────────────────┐")
-    print("│ ⚙️ PERFORMANCE COMPARISON SWEEP (Replications = 50 per count)           │")
-    print("├──────────────┬───────────────┬────────────┬──────────┬─────────────────┤")
-    print("│ Patient (N)  │ Mode          │ Median (s) │ Speedup  │ Throughput/s    │")
-    print("├──────────────┼───────────────┼────────────┼──────────┼─────────────────┤")
+    print("\n┌──────────────────────────────────────────────────────────────────────────────────────┐")
+    print("│ ⚙️ PERFORMANCE COMPARISON SWEEP (Replications = 50 per count)                          │")
+    print("├──────────────┬───────────────┬────────────┬──────────┬──────────────┬──────┬──────┤")
+    print("│ Patient (N)  │ Mode          │ Median (s) │ Speedup  │ Throughput/s │CPU % │Peak% │")
+    print("├──────────────┼───────────────┼────────────┼──────────┼──────────────┼──────┼──────┤")
     for n in patient_counts:
         for m_idx, mode in enumerate(["sequential", "multiprocessing", "threading"]):
             d = next(item for item in timing_results[mode] if item["patient_count"] == n)
             patient_label = f"{n:<12}" if m_idx == 0 else " " * 12
-            print(f"│ {patient_label} │ {mode.capitalize():<13} │ {d['median_time']:>10.4f} │ {d['speedup']:>7.2f}x │ {d['computation_throughput']:>13.1f}   │")
+            avg_cpu = d.get("avg_cpu_utilization", 0.0)
+            peak_cpu = d.get("peak_cpu_utilization", 0.0)
+            print(f"│ {patient_label} │ {mode.capitalize():<13} │ {d['median_time']:>10.4f} │ {d['speedup']:>7.2f}x │ {d['computation_throughput']:>10.1f}   │{avg_cpu:>5.1f} │{peak_cpu:>5.1f} │")
         if n != 500:
-            print("├──────────────┼───────────────┼────────────┼──────────┼─────────────────┤")
-    print("└──────────────┴───────────────┴────────────┴──────────┴─────────────────┘")
+            print("├──────────────┼───────────────┼────────────┼──────────┼──────────────┼──────┼──────┤")
+    print("└──────────────┴───────────────┴────────────┴──────────┴──────────────┴──────┴──────┘")
     
     # Table 3: Convergence Analysis Table
     print("\n┌────────────────────────────────────────────────────────────────────────┐")
@@ -261,6 +263,7 @@ def main():
     print(f"       ├── execution_time.png")
     print(f"       ├── speedup_curve.png")
     print(f"       ├── computational_throughput.png")
+    print(f"       ├── cpu_utilization.png")
     print(f"       ├── waiting_time_by_priority.png")
     print(f"       ├── qq_interarrival.png")
     print(f"       └── qq_service.png")

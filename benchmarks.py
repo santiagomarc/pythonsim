@@ -2,9 +2,23 @@ import os
 import csv
 import statistics
 import time
+import threading
 from typing import List, Dict, Any, Tuple
 import psutil
 from parallel_runner import run_simulation_suite
+
+
+def _sample_cpu_utilization(interval: float, stop_event: threading.Event, samples: List[float]):
+    """
+    Background thread that repeatedly samples system-wide CPU utilization
+    until stop_event is set. Each sample covers `interval` seconds.
+    """
+    # Prime psutil's internal counter so the first real reading isn't 0%
+    psutil.cpu_percent(interval=None)
+    while not stop_event.is_set():
+        pct = psutil.cpu_percent(interval=interval)
+        if not stop_event.is_set():  # avoid stale sample after stop
+            samples.append(pct)
 
 def get_total_memory_usage() -> float:
     """
@@ -62,7 +76,8 @@ def run_performance_sweep(
         writer = csv.writer(csv_file)
         writer.writerow([
             "mode", "patient_count", "replications", "runs", "raw_times", 
-            "median_time", "speedup", "efficiency", "peak_memory_mb", "computation_throughput"
+            "median_time", "speedup", "efficiency", "peak_memory_mb", "computation_throughput",
+            "avg_cpu_utilization", "peak_cpu_utilization"
         ])
         
         for n_patients in patient_counts:
@@ -78,9 +93,21 @@ def run_performance_sweep(
                 print(f"Running mode: {mode.upper()}...")
                 raw_times = []
                 peak_memory_observed = 0.0
+                all_avg_cpu = []
+                all_peak_cpu = []
                 
                 for rep in range(repetitions):
                     mem_before = get_total_memory_usage()
+                    
+                    # Start CPU utilization sampling in a background thread
+                    cpu_samples: List[float] = []
+                    stop_event = threading.Event()
+                    cpu_thread = threading.Thread(
+                        target=_sample_cpu_utilization,
+                        args=(0.25, stop_event, cpu_samples),
+                        daemon=True
+                    )
+                    cpu_thread.start()
                     
                     # Run the simulation suite
                     # Mode mappings to run_simulation_suite modes
@@ -96,13 +123,30 @@ def run_performance_sweep(
                         mode=mode
                     )
                     
+                    # Stop CPU sampling
+                    stop_event.set()
+                    cpu_thread.join(timeout=1.0)
+                    
                     mem_after = get_total_memory_usage()
                     peak_memory_observed = max(peak_memory_observed, mem_before, mem_after)
                     raw_times.append(elapsed)
                     
-                    print(f"  Run {rep + 1}/{repetitions}: {elapsed:.4f}s | Mem: {peak_memory_observed:.2f} MB")
+                    # Compute CPU utilization stats for this repetition
+                    if cpu_samples:
+                        avg_cpu = statistics.mean(cpu_samples)
+                        peak_cpu = max(cpu_samples)
+                    else:
+                        avg_cpu = 0.0
+                        peak_cpu = 0.0
+                    all_avg_cpu.append(avg_cpu)
+                    all_peak_cpu.append(peak_cpu)
+                    
+                    print(f"  Run {rep + 1}/{repetitions}: {elapsed:.4f}s | CPU: avg={avg_cpu:.1f}% peak={peak_cpu:.1f}% | Mem: {peak_memory_observed:.2f} MB")
                 
                 median_time = statistics.median(raw_times)
+                median_avg_cpu = statistics.median(all_avg_cpu) if all_avg_cpu else 0.0
+                median_peak_cpu = statistics.median(all_peak_cpu) if all_peak_cpu else 0.0
+                
                 if mode == "sequential":
                     sequential_median = median_time
                 
@@ -126,7 +170,9 @@ def run_performance_sweep(
                     "speedup": round(speedup, 4),
                     "efficiency": round(efficiency, 4),
                     "peak_memory_mb": round(peak_memory_observed, 2),
-                    "computation_throughput": round(comp_throughput, 2)
+                    "computation_throughput": round(comp_throughput, 2),
+                    "avg_cpu_utilization": round(median_avg_cpu, 2),
+                    "peak_cpu_utilization": round(median_peak_cpu, 2)
                 }
                 
                 sweep_results[mode].append(result_entry)
@@ -142,9 +188,11 @@ def run_performance_sweep(
                     result_entry["speedup"],
                     result_entry["efficiency"],
                     result_entry["peak_memory_mb"],
-                    result_entry["computation_throughput"]
+                    result_entry["computation_throughput"],
+                    result_entry["avg_cpu_utilization"],
+                    result_entry["peak_cpu_utilization"]
                 ])
                 
-                print(f"👉 {mode.upper():15s} | Median: {median_time:.4f}s | Speedup: {speedup:.2f}x | Efficiency: {efficiency:.2%} | Throughput: {comp_throughput:.1f} pat/s | Peak Mem: {peak_memory_observed:.1f} MB")
+                print(f"👉 {mode.upper():15s} | Median: {median_time:.4f}s | Speedup: {speedup:.2f}x | Efficiency: {efficiency:.2%} | Throughput: {comp_throughput:.1f} pat/s | CPU: {median_avg_cpu:.1f}% (peak {median_peak_cpu:.1f}%) | Mem: {peak_memory_observed:.1f} MB")
                 
     return sweep_results

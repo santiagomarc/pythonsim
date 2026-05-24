@@ -139,6 +139,60 @@ def generate_performance_plots(
     plt.savefig(throughput_path, bbox_inches="tight")
     plt.close()
     print(f"✓ Saved Computational Throughput Plot to: {throughput_path}")
+    
+    # ----------------------------------------------------
+    # Plot 4: CPU Utilization Comparison
+    # ----------------------------------------------------
+    # Check that cpu utilization data exists in sweep results
+    if "avg_cpu_utilization" in seq_data[0]:
+        seq_cpu = [d["avg_cpu_utilization"] for d in seq_data]
+        proc_cpu = [d["avg_cpu_utilization"] for d in proc_data]
+        thrd_cpu = [d["avg_cpu_utilization"] for d in thrd_data]
+        
+        seq_peak_cpu = [d.get("peak_cpu_utilization", 0) for d in seq_data]
+        proc_peak_cpu = [d.get("peak_cpu_utilization", 0) for d in proc_data]
+        thrd_peak_cpu = [d.get("peak_cpu_utilization", 0) for d in thrd_data]
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
+        
+        # Left subplot: Average CPU Utilization
+        ax1.plot(patient_counts, seq_cpu, marker="o", markersize=6, label="Sequential (Baseline)", 
+                 color=COLORS["sequential"], linewidth=2.5)
+        ax1.plot(patient_counts, proc_cpu, marker="s", markersize=6, label="Multiprocessing (4 Workers)", 
+                 color=COLORS["multiprocessing"], linewidth=2.5)
+        ax1.plot(patient_counts, thrd_cpu, marker="^", markersize=6, label="Threading (4 Workers - GIL-Bound)", 
+                 color=COLORS["threading"], linewidth=2.5)
+        
+        ax1.set_title("Average CPU Utilization", fontweight="bold", pad=15)
+        ax1.set_xlabel("Patient Count (N)")
+        ax1.set_ylabel("CPU Utilization (%)")
+        ax1.set_xticks(patient_counts)
+        ax1.grid(True)
+        ax1.legend(frameon=True, facecolor="white", edgecolor="#cbd5e1", fontsize=9)
+        
+        # Right subplot: Peak CPU Utilization
+        ax2.plot(patient_counts, seq_peak_cpu, marker="o", markersize=6, label="Sequential (Baseline)", 
+                 color=COLORS["sequential"], linewidth=2.5)
+        ax2.plot(patient_counts, proc_peak_cpu, marker="s", markersize=6, label="Multiprocessing (4 Workers)", 
+                 color=COLORS["multiprocessing"], linewidth=2.5)
+        ax2.plot(patient_counts, thrd_peak_cpu, marker="^", markersize=6, label="Threading (4 Workers - GIL-Bound)", 
+                 color=COLORS["threading"], linewidth=2.5)
+        
+        ax2.set_title("Peak CPU Utilization", fontweight="bold", pad=15)
+        ax2.set_xlabel("Patient Count (N)")
+        ax2.set_ylabel("CPU Utilization (%)")
+        ax2.set_xticks(patient_counts)
+        ax2.grid(True)
+        ax2.legend(frameon=True, facecolor="white", edgecolor="#cbd5e1", fontsize=9)
+        
+        fig.suptitle("CPU Utilization: Sequential vs. Multiprocessing vs. Threading", 
+                      fontweight="bold", fontsize=13, y=1.02)
+        plt.tight_layout()
+        
+        cpu_util_path = os.path.join(output_dir, "cpu_utilization.png")
+        fig.savefig(cpu_util_path, bbox_inches="tight")
+        plt.close(fig)
+        print(f"✓ Saved CPU Utilization Plot to: {cpu_util_path}")
 
 def generate_queueing_plots(
     queueing_data: Dict[int, TrialResult],
