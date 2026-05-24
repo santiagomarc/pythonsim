@@ -199,36 +199,46 @@ def generate_queueing_plots(
     output_dir: str = "results/plots"
 ):
     """
-    Generates queueing theory analysis plots: Patient Wait Times broken down by priority.
+    Generates queueing theory analysis plots: Average Wait Time and Queue Length vs Patient Count.
     """
     os.makedirs(output_dir, exist_ok=True)
     
     patient_counts = sorted(queueing_data.keys())
     avg_waits = [queueing_data[n].avg_wait_time for n in patient_counts]
-    emergency_waits = [queueing_data[n].avg_wait_time_emergency for n in patient_counts]
-    regular_waits = [queueing_data[n].avg_wait_time_regular for n in patient_counts]
+    avg_queue_lengths = [queueing_data[n].avg_queue_length for n in patient_counts]
     
-    plt.figure(figsize=(7.5, 5.5), dpi=300)
+    # --- Plot: Average Wait Time vs Patient Count ---
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5), dpi=300)
     
-    plt.plot(patient_counts, avg_waits, marker="o", markersize=6, label="Overall Average", 
-             color=COLORS["text"], linewidth=2.5)
-    plt.plot(patient_counts, emergency_waits, marker="s", markersize=6, label="Emergency (High Priority)", 
-             color=COLORS["emergency"], linewidth=2.5)
-    plt.plot(patient_counts, regular_waits, marker="^", markersize=6, label="Regular (Normal Priority)", 
-             color=COLORS["regular"], linewidth=2.5)
+    ax1.plot(patient_counts, avg_waits, marker="o", markersize=8, label="Avg Wait Time", 
+             color=COLORS["multiprocessing"], linewidth=2.5)
+    ax1.fill_between(patient_counts, avg_waits, alpha=0.15, color=COLORS["multiprocessing"])
     
-    plt.title("Queue Wait Time by Patient Priority Class", fontweight="bold", pad=15)
-    plt.xlabel("Patient Count (N)")
-    plt.ylabel("Average Waiting Time (minutes)")
-    plt.xticks(patient_counts)
-    plt.grid(True)
-    plt.legend(frameon=True, facecolor="white", edgecolor="#cbd5e1")
+    ax1.set_title("Average Queue Wait Time vs Patient Count", fontweight="bold", pad=15)
+    ax1.set_xlabel("Patient Count (N)")
+    ax1.set_ylabel("Average Waiting Time (minutes)")
+    ax1.set_xticks(patient_counts)
+    ax1.grid(True)
+    ax1.legend(frameon=True, facecolor="white", edgecolor="#cbd5e1")
+    
+    ax2.plot(patient_counts, avg_queue_lengths, marker="s", markersize=8, label="Avg Queue Length ($L_q$)", 
+             color=COLORS["threading"], linewidth=2.5)
+    ax2.fill_between(patient_counts, avg_queue_lengths, alpha=0.15, color=COLORS["threading"])
+    
+    ax2.set_title("Average Queue Length vs Patient Count", fontweight="bold", pad=15)
+    ax2.set_xlabel("Patient Count (N)")
+    ax2.set_ylabel("Average Number of Patients in Queue")
+    ax2.set_xticks(patient_counts)
+    ax2.grid(True)
+    ax2.legend(frameon=True, facecolor="white", edgecolor="#cbd5e1")
+    
+    fig.suptitle("Hospital Registration Queue Performance (FIFO)", fontweight="bold", fontsize=13, y=1.02)
     plt.tight_layout()
     
-    wait_time_path = os.path.join(output_dir, "waiting_time_by_priority.png")
-    plt.savefig(wait_time_path, bbox_inches="tight")
-    plt.close()
-    print(f"✓ Saved Wait Time Priority Plot to: {wait_time_path}")
+    wait_time_path = os.path.join(output_dir, "queue_performance.png")
+    fig.savefig(wait_time_path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"✓ Saved Queue Performance Plot to: {wait_time_path}")
 
 def generate_qq_plots(
     inter_arrival_times: List[float],

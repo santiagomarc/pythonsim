@@ -20,7 +20,7 @@ def parse_args():
         description="Parallel Hospital Patient Registration Queue Simulation and Performance Benchmark (Python)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--lam", type=float, default=0.35, help="Patient arrival rate (lambda, patients/min)")
+    parser.add_argument("--lam", type=float, default=5.0, help="Patient arrival rate (lambda, patients/min)")
     parser.add_argument("--mean-service", type=float, default=10.0, help="Mean service time (minutes)")
     parser.add_argument("--std-service", type=float, default=2.0, help="Standard deviation of service time (minutes)")
     parser.add_argument("-c", type=int, default=4, help="Number of parallel registration counters")
@@ -198,8 +198,6 @@ def main():
     print("│ Patient Count (N)            │     100     │     300     │     500     │")
     print("├──────────────────────────────┼─────────────┼─────────────┼─────────────┤")
     print(f"│ Avg Wait Time (min)          │  {queueing_data[100].avg_wait_time:>9.2f}  │  {queueing_data[300].avg_wait_time:>9.2f}  │  {queueing_data[500].avg_wait_time:>9.2f}  │")
-    print(f"│ Emergency Wait Time (min)    │  {queueing_data[100].avg_wait_time_emergency:>9.2f}  │  {queueing_data[300].avg_wait_time_emergency:>9.2f}  │  {queueing_data[500].avg_wait_time_emergency:>9.2f}  │")
-    print(f"│ Regular Wait Time (min)      │  {queueing_data[100].avg_wait_time_regular:>9.2f}  │  {queueing_data[300].avg_wait_time_regular:>9.2f}  │  {queueing_data[500].avg_wait_time_regular:>9.2f}  │")
     print(f"│ Avg Queue Length             │  {queueing_data[100].avg_queue_length:>9.2f}  │  {queueing_data[300].avg_queue_length:>9.2f}  │  {queueing_data[500].avg_queue_length:>9.2f}  │")
     print(f"│ Staff Utilization            │  {queueing_data[100].server_utilization*100:>8.2f}% │  {queueing_data[300].server_utilization*100:>8.2f}% │  {queueing_data[500].server_utilization*100:>8.2f}% │")
     # Throughput: patients served per simulation minute
@@ -246,8 +244,8 @@ def main():
     # Retrieve best process and thread speedups
     best_proc = max(timing_results["multiprocessing"], key=lambda x: x["speedup"])
     best_thrd = max(timing_results["threading"], key=lambda x: x["speedup"])
-    print(f"│  • Priority Queue Impact: Emergency patients wait times are significantly│")
-    print(f"│    shorter than regular patients due to priority heapq dispatch.     │")
+    print(f"│  • FIFO Queue: All patients are treated equally (first-come,           │")
+    print(f"│    first-served) — no priority classification.                       │")
     print(f"│  • Best Process Pool speedup: {best_proc['speedup']:.2f}x at N={best_proc['patient_count']} patients.             │")
     print(f"│  • Best Thread Pool speedup:  {best_thrd['speedup']:.2f}x at N={best_thrd['patient_count']} patients.             │")
     print(f"│  • GIL Bottleneck: Threading fails to show scaling (>1x speedup) on   │")
@@ -264,7 +262,7 @@ def main():
     print(f"       ├── speedup_curve.png")
     print(f"       ├── computational_throughput.png")
     print(f"       ├── cpu_utilization.png")
-    print(f"       ├── waiting_time_by_priority.png")
+    print(f"       ├── queue_performance.png")
     print(f"       ├── qq_interarrival.png")
     print(f"       └── qq_service.png")
     print("══════════════════════════════════════════════════════════════════════\n")
