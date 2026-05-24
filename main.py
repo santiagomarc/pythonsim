@@ -20,7 +20,7 @@ def parse_args():
         description="Parallel Hospital Patient Registration Queue Simulation and Performance Benchmark (Python)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--lam", type=float, default=5.0, help="Patient arrival rate (lambda, patients/min)")
+    parser.add_argument("--lam", type=float, default=0.35, help="Patient arrival rate (lambda, patients/min)")
     parser.add_argument("--mean-service", type=float, default=10.0, help="Mean service time (minutes)")
     parser.add_argument("--std-service", type=float, default=2.0, help="Standard deviation of service time (minutes)")
     parser.add_argument("-c", type=int, default=4, help="Number of parallel registration counters")

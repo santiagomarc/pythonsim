@@ -104,7 +104,7 @@ def run_performance_sweep(
                     stop_event = threading.Event()
                     cpu_thread = threading.Thread(
                         target=_sample_cpu_utilization,
-                        args=(0.25, stop_event, cpu_samples),
+                        args=(0.01, stop_event, cpu_samples),
                         daemon=True
                     )
                     cpu_thread.start()
@@ -136,8 +136,10 @@ def run_performance_sweep(
                         avg_cpu = statistics.mean(cpu_samples)
                         peak_cpu = max(cpu_samples)
                     else:
-                        avg_cpu = 0.0
-                        peak_cpu = 0.0
+                        # Fallback for extremely fast runs: perform a single-point reading
+                        single_point = psutil.cpu_percent(interval=None)
+                        avg_cpu = single_point
+                        peak_cpu = single_point
                     all_avg_cpu.append(avg_cpu)
                     all_peak_cpu.append(peak_cpu)
                     
