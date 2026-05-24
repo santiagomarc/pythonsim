@@ -1,271 +1,335 @@
 #!/usr/bin/env python3
-import argparse
 import os
 import sys
-import json
-from typing import List, Dict, Any
+import time
+import csv
+import random
+import threading
+import multiprocessing
+import psutil
+import argparse
+import matplotlib.pyplot as plt
+import numpy as np
+from typing import List, Tuple
 
 # Ensure current directory is in Python PATH
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from models import TrialResult
-from des_engine import DESEngine
-from benchmarks import run_performance_sweep
-from parallel_runner import run_simulation_suite
-from statistical_validation import validate_inter_arrival_times, validate_service_times, analyze_convergence
-from plotting import generate_performance_plots, generate_queueing_plots, generate_qq_plots
+# ============================================================
+# MULTIPROCESSING WORKER FUNCTIONS (Top-level for pickle safety on macOS)
+# ============================================================
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Parallel Hospital Patient Registration Queue Simulation and Performance Benchmark (Python)",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("--lam", type=float, default=5.0, help="Patient arrival rate (lambda, patients/min)")
-    parser.add_argument("--mean-service", type=float, default=10.0, help="Mean service time (minutes)")
-    parser.add_argument("--std-service", type=float, default=2.0, help="Standard deviation of service time (minutes)")
-    parser.add_argument("-c", type=int, default=4, help="Number of parallel registration counters")
-    parser.add_argument("--replications", type=int, default=50, help="Number of simulation replications for timing sweep")
-    parser.add_argument("--reps", type=int, default=3, help="Number of repetitions per execution mode for timing robustness")
-    parser.add_argument("--output", type=str, default="results", help="Directory to save CSVs, plots, and reports")
-    return parser.parse_args()
+def worker_process(
+    worker_id: int, 
+    queue: multiprocessing.Queue, 
+    results_queue: multiprocessing.Queue, 
+    arrivals_finished: multiprocessing.Event,
+    mean_service: float,
+    std_service: float,
+    start_time: float
+):
+    """
+    Parallel worker process representing a registration counter.
+    Pulls patients from the shared multiprocessing Queue and processes them.
+    """
+    # Seed the local random generator based on PID and time to ensure thread-safety
+    random.seed(os.getpid() + worker_id)
+    
+    while True:
+        # Check if we should exit: arrivals are done and the queue is empty
+        if queue.empty() and arrivals_finished.is_set():
+            break
+            
+        try:
+            # Try to get a patient from the queue with a tiny timeout to prevent deadlocks
+            patient_id, arrival_time = queue.get(timeout=0.05)
+        except Exception:
+            continue
+            
+        # Record service start time
+        service_start_time = time.time() - start_time
+        waiting_time = service_start_time - arrival_time
+        
+        # Format printing safely
+        sys.stdout.write(f"\nCounter {worker_id} assigned to Patient {patient_id}\n")
+        sys.stdout.flush()
+        
+        # Generate service duration from Truncated Normal distribution
+        service_time = random.normalvariate(mean_service, std_service)
+        if service_time < 0.1: # Truncate service times at 0.1 seconds (min = 50s real time)
+            service_time = 0.1
+            
+        # Simulate processing via sleeping
+        time.sleep(service_time)
+        
+        # Record departure metrics
+        departure_time = time.time() - start_time
+        turnaround_time = departure_time - arrival_time
+        
+        # Push results back to main process
+        results_queue.put((
+            patient_id, 
+            arrival_time, 
+            service_start_time, 
+            waiting_time, 
+            service_time, 
+            departure_time, 
+            turnaround_time, 
+            worker_id
+        ))
+        
+        # Formatted output matching C++ console format
+        output = (
+            f"Patient {patient_id} processed by Counter {worker_id}\n"
+            f"Arrival Time       : {arrival_time:.2f} sec\n"
+            f"Service Start Time : {service_start_time:.2f} sec\n"
+            f"Waiting Time       : {waiting_time:.2f} sec\n"
+            f"Service Duration   : {service_time:.2f} sec\n"
+            f"Departure Time     : {departure_time:.2f} sec\n"
+            f"Turnaround Time    : {turnaround_time:.2f} sec\n"
+            f"----------------------------------\n"
+        )
+        sys.stdout.write(output)
+        sys.stdout.flush()
+
+
+def arrival_generator(
+    total_patients: int, 
+    arrival_interval: float, 
+    queue: multiprocessing.Queue, 
+    arrivals_finished: multiprocessing.Event,
+    start_time: float
+):
+    """
+    Generates patient arrivals at fixed intervals and places them in the queue.
+    """
+    for i in range(1, total_patients + 1):
+        now = time.time() - start_time
+        queue.put((i, now))
+        
+        sys.stdout.write(f"Patient {i:>3d} arrived at {now:.2f} sec\n")
+        sys.stdout.flush()
+        
+        time.sleep(arrival_interval)
+        
+    arrivals_finished.set()
+
+
+def monitor_cpu(stop_event: threading.Event, cpu_samples: List[float]):
+    """
+    Background thread that samples system-wide and process-tree CPU utilization.
+    Accumulates CPU consumption of the main process and all parallel multiprocessing children.
+    """
+    parent = psutil.Process(os.getpid())
+    while not stop_event.is_set():
+        try:
+            # Get CPU percent for the main process
+            cpu_pct = parent.cpu_percent(interval=None)
+            
+            # Accumulate CPU percent for all multiprocessing children
+            for child in parent.children(recursive=True):
+                try:
+                    cpu_pct += child.cpu_percent(interval=None)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            cpu_samples.append(cpu_pct)
+        except Exception:
+            pass
+        time.sleep(0.1)
+
+
+# ============================================================
+# MAIN SIMULATION ENGINE & PLOTTING
+# ============================================================
+
+def generate_performance_plots(results: List[Tuple], cpu_samples: List[float], output_dir: str):
+    """
+    Generates high-resolution scientific plots representing the simulation run.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Unpack results:
+    # 0: pid, 1: arr, 2: start, 3: wait, 4: dur, 5: dep, 6: turn, 7: worker
+    results = sorted(results, key=lambda x: x[0])
+    pids = [r[0] for r in results]
+    waits = [r[3] for r in results]
+    durations = [r[4] for r in results]
+    turnarounds = [r[6] for r in results]
+    
+    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
+    fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Color palette
+    primary_color = "#3B82F6"  # Premium Blue
+    secondary_color = "#10B981" # Emerald Green
+    accent_color = "#EF4444"    # Coral Red
+    dark_bg = "#1F2937"
+    
+    # Plot 1: Patient Waiting Times
+    axs[0, 0].plot(pids, waits, color=primary_color, marker='o', linestyle='-', linewidth=2, markersize=4)
+    axs[0, 0].set_title("Patient Waiting Times in Queue", fontsize=12, fontweight='bold', pad=10)
+    axs[0, 0].set_xlabel("Patient ID", fontsize=10)
+    axs[0, 0].set_ylabel("Wait Time (seconds)", fontsize=10)
+    axs[0, 0].fill_between(pids, waits, color=primary_color, alpha=0.15)
+    
+    # Plot 2: Wait vs Service Times (Stacked bar preview)
+    width = 0.35
+    axs[0, 1].bar(pids[:20], waits[:20], width, label='Wait Time', color=accent_color, alpha=0.8)
+    axs[0, 1].bar(pids[:20], durations[:20], width, bottom=waits[:20], label='Service Time', color=secondary_color, alpha=0.8)
+    axs[0, 1].set_title("Timeline Breakdown (First 20 Patients)", fontsize=12, fontweight='bold', pad=10)
+    axs[0, 1].set_xlabel("Patient ID", fontsize=10)
+    axs[0, 1].set_ylabel("Time (seconds)", fontsize=10)
+    axs[0, 1].legend()
+    
+    # Plot 3: CPU Utilization Over Time
+    time_points = np.linspace(0, len(cpu_samples) * 0.1, len(cpu_samples))
+    axs[1, 0].plot(time_points, cpu_samples, color="#8B5CF6", linewidth=2)
+    axs[1, 0].set_title("Process Tree CPU Utilization", fontsize=12, fontweight='bold', pad=10)
+    axs[1, 0].set_xlabel("Elapsed Time (seconds)", fontsize=10)
+    axs[1, 0].set_ylabel("CPU Usage (%)", fontsize=10)
+    axs[1, 0].fill_between(time_points, cpu_samples, color="#8B5CF6", alpha=0.15)
+    
+    # Plot 4: Distribution of Turnaround Times
+    axs[1, 1].hist(turnarounds, bins=15, color="#EC4899", edgecolor='black', alpha=0.7)
+    axs[1, 1].set_title("Distribution of Turnaround Times", fontsize=12, fontweight='bold', pad=10)
+    axs[1, 1].set_xlabel("Turnaround Time (seconds)", fontsize=10)
+    axs[1, 1].set_ylabel("Frequency", fontsize=10)
+    
+    plt.tight_layout()
+    plot_path = os.path.join(output_dir, "python_queue_performance.png")
+    plt.savefig(plot_path, dpi=300)
+    plt.close()
+    print(f"📊 Premium performance plot saved to: {plot_path}")
+
 
 def main():
-    args = parse_args()
-    
-    print("======================================================================")
-    print("🏥  HOSPITAL REGISTRATION QUEUE SIMULATION - RESEARCH ENGINE  🏥")
-    print("======================================================================")
-    print(f"  • Arrival Rate (λ): {args.lam} patients/min (mean inter-arrival = {1.0/args.lam:.2f} min)")
-    print(f"  • Service Time: Normal(mean={args.mean_service} min, std={args.std_service} min) [Truncated min=1]")
-    print(f"  • Registration Counters (c): {args.c}")
-    print(f"  • Benchmarking Config: {args.replications} reps, {args.reps} timing repetitions")
-    print(f"  • Output Directory: {args.output}")
-    print("======================================================================\n")
-    
-    # ----------------------------------------------------
-    # Step 1: Run Representative Single Runs for Queueing Metrics (Seed = 42)
-    # ----------------------------------------------------
-    print("[Step 1/5] Running single representative simulation trials (Seed=42)...")
-    queueing_data: Dict[int, TrialResult] = {}
-    patient_counts = [100, 300, 500]
-    
-    for n in patient_counts:
-        # We run 1 replication with fixed seed 42 to get stable queueing metrics
-        # Warmup is 20 patients for 300 and 500, but 0 for 100 to avoid losing too much data
-        warmup = 20 if n > 100 else 0
-        results, _ = run_simulation_suite(
-            n_replications=1,
-            n_workers=1,
-            lam=args.lam,
-            mean_service=args.mean_service,
-            std_service=args.std_service,
-            c=args.c,
-            max_patients=n,
-            warmup_patients=warmup,
-            mode="sequential"
+    parser = argparse.ArgumentParser(description="Real-Time Multiprocessing Queue Simulation (Python)")
+    parser.add_argument("--patients", type=int, default=100, help="Total number of patients/jobs to simulate")
+    parser.add_argument("--workers", type=int, default=4, help="Number of parallel worker processes (registration counters)")
+    parser.add_argument("--output", type=str, default="results", help="Directory to save plots and CSV logs")
+    args = parser.parse_args()
+
+    # Time scaling factor matches C++ (1/500):
+    # 12 real seconds inter-arrival -> 24 ms.
+    # 600 real seconds service -> 1200 ms.
+    # 120 real seconds service std dev -> 240 ms.
+    scale_factor = 500.0
+    arrival_interval = 0.024 # 24 ms
+    mean_service = 1.2       # 1200 ms
+    std_service = 0.24       # 240 ms
+
+    # Initialize shared multiprocessing constructs
+    queue = multiprocessing.Queue()
+    results_queue = multiprocessing.Queue()
+    arrivals_finished = multiprocessing.Event()
+
+    print("=========================================")
+    print("PYTHON MULTIPROCESSING QUEUE SIMULATION  ")
+    print("=========================================")
+    print(f"Patients (Jobs)      : {args.patients}")
+    print(f"Worker Processes     : {args.workers}")
+    print(f"Arrival Interval     : {arrival_interval * 1000:.0f} ms (scaled 1/500 from 12s)")
+    print(f"Service mean/std     : {mean_service * 1000:.0f} / {std_service * 1000:.0f} ms (scaled 1/500 from 10 min)")
+    print(f"Traffic Intensity (ρ): 12.50 (Overloaded Queue)")
+    print("=========================================\n")
+
+    # Prime CPU utilization counter
+    psutil.cpu_percent(interval=None)
+
+    # Start CPU sampling in background
+    cpu_samples = []
+    stop_cpu_event = threading.Event()
+    cpu_thread = threading.Thread(target=monitor_cpu, args=(stop_cpu_event, cpu_samples), daemon=True)
+    cpu_thread.start()
+
+    simulation_start = time.time()
+
+    # Launch Parallel Worker Processes
+    processes = []
+    for w in range(args.workers):
+        p = multiprocessing.Process(
+            target=worker_process,
+            args=(w, queue, results_queue, arrivals_finished, mean_service, std_service, simulation_start)
         )
-        # Set seed on result
-        results[0].seed = 42
-        queueing_data[n] = results[0]
-        print(f"  ✓ Trial N={n} completed (warmup={warmup}).")
+        p.start()
+        processes.append(p)
 
-    # ----------------------------------------------------
-    # Step 2: Run Multi-Replication Sweeps for Convergence Analysis
-    # ----------------------------------------------------
-    print("\n[Step 2/5] Running multiple replications for statistical convergence analysis...")
-    convergence_data: Dict[int, List[TrialResult]] = {}
-    
-    for n in patient_counts:
-        warmup = 20 if n > 100 else 0
-        print(f"  Running 30 replications for N={n} patients...")
-        results, _ = run_simulation_suite(
-            n_replications=30,
-            n_workers=4,
-            lam=args.lam,
-            mean_service=args.mean_service,
-            std_service=args.std_service,
-            c=args.c,
-            max_patients=n,
-            warmup_patients=warmup,
-            mode="multiprocessing"
-        )
-        convergence_data[n] = results
-        
-    convergence_summary = analyze_convergence(convergence_data)
-    print("  ✓ Convergence analysis calculated successfully.")
-
-    # ----------------------------------------------------
-    # Step 3: Input Distribution Statistical Validation (pooled from N=500 runs)
-    # ----------------------------------------------------
-    print("\n[Step 3/5] Performing input distribution goodness-of-fit validation...")
-    all_interarrivals = []
-    all_services = []
-    for r in convergence_data[500]:
-        all_interarrivals.extend(r.inter_arrival_times)
-        all_services.extend(r.service_times)
-        
-    input_validation_arr = validate_inter_arrival_times(all_interarrivals, args.lam)
-    input_validation_srv = validate_service_times(all_services, args.mean_service, args.std_service)
-    
-    print("  ✓ Kolmogorov-Smirnov and Shapiro-Wilk validations complete.")
-
-    # ----------------------------------------------------
-    # Step 4: Parallel Scalability & Timing Sweeps
-    # ----------------------------------------------------
-    print("\n[Step 4/5] Starting parallel scalability timing sweeps...")
-    timing_results = run_performance_sweep(
-        n_replications=args.replications,
-        n_workers=4,
-        patient_counts=patient_counts,
-        lam=args.lam,
-        mean_service=args.mean_service,
-        std_service=args.std_service,
-        c=args.c,
-        warmup_patients=20,  # use 20 warmup for timing sweep to remain standard
-        repetitions=args.reps,
-        results_dir=args.output
+    # Launch Arrival Generator Thread
+    arrival_thread = threading.Thread(
+        target=arrival_generator,
+        args=(args.patients, arrival_interval, queue, arrivals_finished, simulation_start)
     )
+    arrival_thread.start()
 
-    # ----------------------------------------------------
-    # Step 5: Save Validation Report & Generate Plots
-    # ----------------------------------------------------
-    print("\n[Step 5/5] Generating plots and writing final validation report...")
+    # Wait for completion
+    arrival_thread.join()
+    for p in processes:
+        p.join()
+
+    simulation_end = time.time()
+    total_execution_time = simulation_end - simulation_start
+
+    # Stop CPU monitoring
+    stop_cpu_event.set()
+    cpu_thread.join(timeout=1.0)
+
+    # Drain results queue
+    results = []
+    total_waiting_time = 0.0
+    total_turnaround_time = 0.0
+    total_worker_busy_time = 0.0
     
-    # 5.1 Save detailed report
-    report_filename = os.path.join(args.output, "validation_report.txt")
+    while not results_queue.empty():
+        r = results_queue.get()
+        results.append(r)
+        total_waiting_time += r[3] # wait time
+        total_worker_busy_time += r[4] # service dur
+        total_turnaround_time += r[6] # turnaround time
+
+    processed_patients = len(results)
+    if processed_patients == 0:
+        print("Error: No patients processed. Exiting.")
+        sys.exit(1)
+
+    # Core statistics calculations
+    avg_wait = total_waiting_time / processed_patients
+    avg_turnaround = total_turnaround_time / processed_patients
+    throughput = processed_patients / total_execution_time
+    avg_cpu = np.mean(cpu_samples) if cpu_samples else 0.0
+
+    # Scale back to real-world minutes (scaling factor is 1/500)
+    avg_wait_real_min = (avg_wait * scale_factor) / 60.0
+    avg_turnaround_real_min = (avg_turnaround * scale_factor) / 60.0
+    
+    # Calculate Counter Utilization
+    worker_util = (total_worker_busy_time / (args.workers * total_execution_time)) * 100.0
+
+    # Write to CSV log
     os.makedirs(args.output, exist_ok=True)
-    
-    with open(report_filename, "w") as report_file:
-        def log(text):
-            print(text)
-            report_file.write(text + "\n")
-            
-        log("======================================================================")
-        log("      🏥  HOSPITAL QUEUE SIMULATION STATISTICAL VALIDATION REPORT     ")
-        log("======================================================================")
-        log(f"Simulation Parameters: lam={args.lam}, mean_service={args.mean_service}, std_service={args.std_service}, c={args.c}")
-        log("======================================================================\n")
-        
-        log("1. INPUT GENERATOR VALIDATION (Goodness-of-Fit)")
-        log("----------------------------------------------------------------------")
-        log(f"Inter-Arrival Times (Expected Mean: {input_validation_arr['expected_mean']:.4f}, Observed Mean: {input_validation_arr['sample_mean']:.4f})")
-        log(f"  - Kolmogorov-Smirnov Test: Stat={input_validation_arr['ks_stat']:.5f}, p-value={input_validation_arr['ks_p_value']:.4e}")
-        log(f"  👉 Exp Distribution Model Validated? {'✅ YES (p > 0.05)' if input_validation_arr['ks_valid'] else '❌ NO'}")
-        
-        log(f"\nService Times (Expected Mean: {input_validation_srv['expected_mean']:.4f}, Observed Mean: {input_validation_srv['sample_mean']:.4f})")
-        log(f"  - Kolmogorov-Smirnov Test: Stat={input_validation_srv['ks_stat']:.5f}, p-value={input_validation_srv['ks_p_value']:.4e}")
-        log(f"  👉 Normal Distribution Parameter Model Validated? {'✅ YES (p > 0.05)' if input_validation_srv['ks_valid'] else '❌ NO'}")
-        log(f"  - Shapiro-Wilk Normality Test: Stat={input_validation_srv['shapiro_stat']:.5f}, p-value={input_validation_srv['shapiro_p_value']:.4e}")
-        log(f"  👉 Normal Distribution Shape Validated? {'✅ YES (p > 0.05)' if input_validation_srv['shapiro_valid'] else '❌ NO'}")
-        
-        log("\n======================================================================")
-        log("2. CONVERGENCE & VARIANCE ANALYSIS (Across 30 Replications)")
-        log("----------------------------------------------------------------------")
-        for n in patient_counts:
-            summ = convergence_summary[n]
-            log(f"Patient Count N = {n}:")
-            log(f"  - Avg Wait Time in Queue: {summ['avg_wait_time']['mean']:.4f} min (95% CI: [{summ['avg_wait_time']['ci_95'][0]:.4f}, {summ['avg_wait_time']['ci_95'][1]:.4f}], CV: {summ['avg_wait_time']['cv']:.4f})")
-            log(f"  - System Throughput:      {summ['throughput']['mean']:.4f} pat/min (95% CI: [{summ['throughput']['ci_95'][0]:.4f}, {summ['throughput']['ci_95'][1]:.4f}], CV: {summ['throughput']['cv']:.4f})")
-            log(f"  - Staff Utilization:      {summ['server_utilization']['mean'] * 100:.2f}% (95% CI: [{summ['server_utilization']['ci_95'][0]*100:.2f}%, {summ['server_utilization']['ci_95'][1]*100:.2f}%])")
-            log("")
-        log("======================================================================")
-        log("                         END OF VALIDATION REPORT                     ")
-        log("======================================================================")
+    csv_path = os.path.join(args.output, "timing_results.csv")
+    with open(csv_path, mode='w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(["patient_id", "arrival_sec", "service_start_sec", "wait_sec", "service_sec", "departure_sec", "turnaround_sec", "counter_id"])
+        for r in sorted(results, key=lambda x: x[0]):
+            writer.writerow(r)
 
-    # 5.2 Generate plots
-    plot_dir = os.path.join(args.output, "plots")
-    
-    # Sample a subset of pooled times to avoid cluttering Q-Q plots
-    inter_sample = sorted(all_interarrivals[::max(1, len(all_interarrivals)//1000)])
-    srv_sample = sorted(all_services[::max(1, len(all_services)//1000)])
-    
-    generate_performance_plots(timing_results, plot_dir)
-    generate_queueing_plots(queueing_data, plot_dir)
-    generate_qq_plots(inter_sample, srv_sample, args.lam, args.mean_service, args.std_service, plot_dir)
-    
-    # ============================================================
-    # FINAL COMPREHENSIVE TERMINAL SUMMARY
-    # ============================================================
-    print("\n")
-    print("╔════════════════════════════════════════════════════════════════════════╗")
-    print("║     🎉 COMPLETE RESULTS SUMMARY — HOSPITAL QUEUE SIMULATION 🎉         ║")
-    print("╚════════════════════════════════════════════════════════════════════════╝")
-    
-    # Table 1: Hospital Queueing Metrics Table
-    print("\n┌────────────────────────────────────────────────────────────────────────┐")
-    print("│ 🏥 HOSPITAL REGISTRATION QUEUE PERFORMANCE METRICS (Seed = 42)         │")
-    print("├──────────────────────────────┬─────────────┬─────────────┬─────────────┤")
-    print("│ Patient Count (N)            │     100     │     300     │     500     │")
-    print("├──────────────────────────────┼─────────────┼─────────────┼─────────────┤")
-    print(f"│ Avg Wait Time (min)          │  {queueing_data[100].avg_wait_time:>9.2f}  │  {queueing_data[300].avg_wait_time:>9.2f}  │  {queueing_data[500].avg_wait_time:>9.2f}  │")
-    print(f"│ Avg Queue Length             │  {queueing_data[100].avg_queue_length:>9.2f}  │  {queueing_data[300].avg_queue_length:>9.2f}  │  {queueing_data[500].avg_queue_length:>9.2f}  │")
-    print(f"│ Staff Utilization            │  {queueing_data[100].server_utilization*100:>8.2f}% │  {queueing_data[300].server_utilization*100:>8.2f}% │  {queueing_data[500].server_utilization*100:>8.2f}% │")
-    # Throughput: patients served per simulation minute
-    tp_100 = queueing_data[100].total_patients_served / queueing_data[100].sim_duration
-    tp_300 = queueing_data[300].total_patients_served / queueing_data[300].sim_duration
-    tp_500 = queueing_data[500].total_patients_served / queueing_data[500].sim_duration
-    print(f"│ System Throughput (pat/min)  │  {tp_100:>9.2f}  │  {tp_300:>9.2f}  │  {tp_500:>9.2f}  │")
-    print("└──────────────────────────────┴─────────────┴─────────────┴─────────────┘")
-    
-    # Table 2: Performance Timing Comparison Table
-    print("\n┌──────────────────────────────────────────────────────────────────────────────────────┐")
-    print("│ ⚙️ PERFORMANCE COMPARISON SWEEP (Replications = 50 per count)                          │")
-    print("├──────────────┬───────────────┬────────────┬──────────┬──────────────┬──────┬──────┤")
-    print("│ Patient (N)  │ Mode          │ Median (s) │ Speedup  │ Throughput/s │CPU % │Peak% │")
-    print("├──────────────┼───────────────┼────────────┼──────────┼──────────────┼──────┼──────┤")
-    for n in patient_counts:
-        for m_idx, mode in enumerate(["sequential", "multiprocessing", "threading"]):
-            d = next(item for item in timing_results[mode] if item["patient_count"] == n)
-            patient_label = f"{n:<12}" if m_idx == 0 else " " * 12
-            avg_cpu = d.get("avg_cpu_utilization", 0.0)
-            peak_cpu = d.get("peak_cpu_utilization", 0.0)
-            print(f"│ {patient_label} │ {mode.capitalize():<13} │ {d['median_time']:>10.4f} │ {d['speedup']:>7.2f}x │ {d['computation_throughput']:>10.1f}   │{avg_cpu:>5.1f} │{peak_cpu:>5.1f} │")
-        if n != 500:
-            print("├──────────────┼───────────────┼────────────┼──────────┼──────────────┼──────┼──────┤")
-    print("└──────────────┴───────────────┴────────────┴──────────┴──────────────┴──────┴──────┘")
-    
-    # Table 3: Convergence Analysis Table
-    print("\n┌────────────────────────────────────────────────────────────────────────┐")
-    print("│ 📈 STATISTICAL CONVERGENCE & VARIANCE STABILIZATION (30 Reps)          │")
-    print("├──────────────┬───────────────────────────────┬─────────────────────────┤")
-    print("│ Patient (N)  │ Average Wait Time Mean ± 95%CI│ Throughput Mean ± 95%CI │")
-    print("├──────────────┼───────────────────────────────┼─────────────────────────┤")
-    for n in patient_counts:
-        s = convergence_summary[n]
-        wait_text = f"{s['avg_wait_time']['mean']:.2f} ± {s['avg_wait_time']['std']*1.96/30**0.5:.2f} (CV={s['avg_wait_time']['cv']:.2f})"
-        tp_text = f"{s['throughput']['mean']:.2f} ± {s['throughput']['std']*1.96/30**0.5:.2f} (CV={s['throughput']['cv']:.2f})"
-        print(f"│ {n:<12} │ {wait_text:<29} │ {tp_text:<23} │")
-    print("└──────────────┴───────────────────────────────┴─────────────────────────┘")
-    
-    # Key Findings section
-    print("\n┌────────────────────────────────────────────────────────────────────────┐")
-    print("│ 🔑 KEY COMPARATIVE FINDINGS FOR PAPER                                 │")
-    print("├────────────────────────────────────────────────────────────────────────┤")
-    # Retrieve best process and thread speedups
-    best_proc = max(timing_results["multiprocessing"], key=lambda x: x["speedup"])
-    best_thrd = max(timing_results["threading"], key=lambda x: x["speedup"])
-    print(f"│  • FIFO Queue: All patients are treated equally (first-come,           │")
-    print(f"│    first-served) — no priority classification.                       │")
-    print(f"│  • Best Process Pool speedup: {best_proc['speedup']:.2f}x at N={best_proc['patient_count']} patients.             │")
-    print(f"│  • Best Thread Pool speedup:  {best_thrd['speedup']:.2f}x at N={best_thrd['patient_count']} patients.             │")
-    print(f"│  • GIL Bottleneck: Threading fails to show scaling (>1x speedup) on   │")
-    print(f"│    CPU-bound simulations, validating the Python GIL's thread locks.   │")
-    print(f"│  • Convergence: As N increases, the Coefficient of Variation (CV)     │")
-    print(f"│    decreases, demonstrating statistical steady-state stabilization.   │")
-    print("└────────────────────────────────────────────────────────────────────────┘")
-    
-    print(f"\n📁 All results saved to: {os.path.abspath(args.output)}/")
-    print(f"   ├── validation_report.txt (statistical goodness-of-fit and convergence)")
-    print(f"   ├── timing_results.csv (benchmark dataset)")
-    print(f"   └── plots/")
-    print(f"       ├── execution_time.png")
-    print(f"       ├── speedup_curve.png")
-    print(f"       ├── computational_throughput.png")
-    print(f"       ├── cpu_utilization.png")
-    print(f"       ├── queue_performance.png")
-    print(f"       ├── qq_interarrival.png")
-    print(f"       └── qq_service.png")
-    print("══════════════════════════════════════════════════════════════════════\n")
+    # Print Summary matching C++ formatting exactly
+    print("\n===== SIMULATION SUMMARY =====\n")
+    print(f"Total Patients Processed : {processed_patients}")
+    print(f"Counters/Workers Used    : {args.workers}")
+    print(f"Total Execution Time     : {total_execution_time:.2f} sec (scaled: {(total_execution_time * scale_factor) / 60.0:.2f} real min)")
+    print(f"Average Waiting Time     : {avg_wait:.2f} sec (scaled: {avg_wait_real_min:.2f} real min)")
+    print(f"Average Turnaround Time  : {avg_turnaround:.2f} sec (scaled: {avg_turnaround_real_min:.2f} real min)")
+    print(f"Throughput               : {throughput:.2f} patients/sec (scaled: {throughput * (60.0 / scale_factor):.2f} patients/real min)")
+    print(f"Worker Utilization (ρ)   : {worker_util:.2f} %")
+    print(f"System CPU Utilization   : {avg_cpu:.2f} %")
+    print("\n=========================================\n")
+
+    # Generate visual plots
+    generate_performance_plots(results, cpu_samples, args.output)
+
 
 if __name__ == "__main__":
+    # Fix spawn issue on macOS
+    multiprocessing.freeze_support()
     main()
