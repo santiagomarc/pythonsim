@@ -1,5 +1,7 @@
 import heapq
 import random
+from collections import deque
+from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 from models import Event, EventType, Patient, TrialResult
 
@@ -12,7 +14,8 @@ class DESEngine:
         c: int,
         max_patients: int,
         rng: random.Random,
-        warmup_patients: int = 20
+        warmup_patients: int = 20,
+        verbose: bool = False
     ):
         self.lam = lam
         self.mean_service = mean_service
@@ -21,15 +24,14 @@ class DESEngine:
         self.max_patients = max_patients
         self.rng = rng
         self.warmup_patients = warmup_patients
+        self.verbose = verbose
 
         # Simulation State
         self.current_time = 0.0
         self.event_queue: List[Event] = []
         
-        # waiting_queue contains elements of form: (arrival_time, patient_id)
-        # arrival_time: tie-breaker (FIFO)
-        # patient_id: secondary tie-breaker
-        self.waiting_queue: List[Tuple[float, int]] = []
+        # Simple FIFO waiting queue (no priority — all patients are equal)
+        self.waiting_queue: deque = deque()
         
         self.counters_busy = [False] * c  # Track which registration counters are busy
         self.patients: Dict[int, Patient] = {}
@@ -40,7 +42,7 @@ class DESEngine:
         
         # Time-weighted statistics
         self.area_queue_length = 0.0
-        self.area_counter_utilization = [0.0] * c
+        self.area_counter_utilization = 0.0
         
         # Warmup transition settings
         if self.warmup_patients == 0:
@@ -75,7 +77,7 @@ class DESEngine:
     def _reset_warmup_stats(self):
         """Clears all accumulated stats and resets integration start to remove initialization bias."""
         self.area_queue_length = 0.0
-        self.area_counter_utilization = [0.0] * self.c
+        self.area_counter_utilization = 0.0
         self.stats_start_time = self.current_time
         
         self.recorded_patients_served.clear()
@@ -85,6 +87,9 @@ class DESEngine:
         self.warmup_reset_done = True
 
     def run(self) -> TrialResult:
+        if self.verbose:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ==== TRIAL 1: {self.max_patients} patients ====")
+            
         # Schedule first arrival
         first_interarrival = self.rng.expovariate(self.lam)
         self.schedule_event(first_interarrival, EventType.ARRIVAL, patient_id=1)
@@ -102,12 +107,14 @@ class DESEngine:
             time_diff = self.current_time - self.last_state_change_time
             if time_diff > 0:
                 self.area_queue_length += len(self.waiting_queue) * time_diff
-                for i in range(self.c):
-                    if self.counters_busy[i]:
-                        self.area_counter_utilization[i] += time_diff
+                self.area_counter_utilization += sum(self.counters_busy) * time_diff
             self.last_state_change_time = self.current_time
 
             if event.event_type == EventType.ARRIVAL:
+                if self.verbose:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] Patient {event.patient_id} arrived.")
+                    
+                # All patients are equal — no priority classification
                 patient = Patient(patient_id=event.patient_id, arrival_time=self.current_time)
                 self.patients[patient.patient_id] = patient
                 
@@ -118,6 +125,9 @@ class DESEngine:
                     self.counters_busy[idle_counter_id] = True
                     patient.service_start_time = self.current_time
                     patient.counter_id = idle_counter_id
+                    
+                    if self.verbose:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] Patient {patient.patient_id} done registration and start processing.")
                     
                     service_dur = self.get_truncated_normal_service_time()
                     patient.service_duration = service_dur
@@ -132,8 +142,8 @@ class DESEngine:
                         idle_counter_id
                     )
                 else:
-                    # Place in waiting queue (FIFO)
-                    heapq.heappush(self.waiting_queue, (patient.arrival_time, patient.patient_id))
+                    # Place in FIFO waiting queue
+                    self.waiting_queue.append(patient.patient_id)
 
                 # Schedule next arrival
                 inter_arr = self.rng.expovariate(self.lam)
@@ -162,15 +172,17 @@ class DESEngine:
                     counter_id = event.server_id
                     self.counters_busy[counter_id] = False
                     
-                    # If queue is not empty, serve next patient from priority waiting queue
+                    # If queue is not empty, serve next patient (FIFO order)
                     if self.waiting_queue:
-                        arrival_time, pid = heapq.heappop(self.waiting_queue)
+                        pid = self.waiting_queue.popleft()
                         next_patient = self.patients[pid]
-
                         
                         self.counters_busy[counter_id] = True
                         next_patient.service_start_time = self.current_time
                         next_patient.counter_id = counter_id
+                        
+                        if self.verbose:
+                            print(f"[{datetime.now().strftime('%H:%M:%S')}] Patient {next_patient.patient_id} done registration and start processing.")
                         
                         service_dur = self.get_truncated_normal_service_time()
                         next_patient.service_duration = service_dur
@@ -191,16 +203,14 @@ class DESEngine:
             sim_duration_post_warmup = 1e-9
 
         avg_q_len = self.area_queue_length / sim_duration_post_warmup
-        counter_utils = [area / sim_duration_post_warmup for area in self.area_counter_utilization]
+        avg_util = self.area_counter_utilization / (self.c * sim_duration_post_warmup)
         
         # Filter patients served post-warmup
         wait_times = [p.wait_time for p in self.recorded_patients_served if p.wait_time is not None]
         system_times = [p.system_time for p in self.recorded_patients_served if p.system_time is not None]
-        service_times = [p.service_duration for p in self.recorded_patients_served if p.service_duration is not None]
         
         avg_wait = sum(wait_times) / len(wait_times) if wait_times else 0.0
         avg_sys = sum(system_times) / len(system_times) if system_times else 0.0
-        avg_service = sum(service_times) / len(service_times) if service_times else 0.0
 
         # Pick a random seed for the returned result
         seed_val = self.rng.randint(0, 10000000)
@@ -208,10 +218,11 @@ class DESEngine:
         return TrialResult(
             seed=seed_val,
             avg_wait_time=avg_wait,
-            avg_service_time=avg_service,
             avg_system_time=avg_sys,
             avg_queue_length=avg_q_len,
-            counter_utilizations=counter_utils,
+            server_utilization=avg_util,
             sim_duration=sim_duration_post_warmup,
             total_patients_served=len(self.recorded_patients_served),
+            inter_arrival_times=self.recorded_inter_arrival_times,
+            service_times=self.recorded_service_times
         )
